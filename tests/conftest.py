@@ -1,0 +1,9 @@
+import os
+os.environ.setdefault("USE_MOCK_EMBEDDINGS", "true")
+os.environ.setdefault("LOG_FORMAT", "console")
+os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+os.environ.setdefault("DATABASE_URL_SYNC", "sqlite:///:memory:")
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault("CELERY_BROKER_URL", "redis://localhost:6379/0")
+os.environ.setdefault("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")

@@ -1,0 +1,114 @@
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-promptuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-promptpass}
+      POSTGRES_DB: ${POSTGRES_DB:-promptdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-promptuser} -d ${POSTGRES_DB:-promptdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - model_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    command: >
+      celery -A src.workers.celery_app worker
+      --loglevel=info
+      --queues=high,normal,low
+      --concurrency=2
+      --hostname=worker@%h
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - model_cache:/root/.cache/huggingface
+
+  worker2:
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    command: >
+      celery -A src.workers.celery_app worker
+      --loglevel=info
+      --queues=high,normal,low
+      --concurrency=2
+      --hostname=worker2@%h
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - model_cache:/root/.cache/huggingface
+
+  flower:
+    build:
+      context: .
+      target: app
+    restart: unless-stopped
+    command: >
+      celery -A src.workers.celery_app flower
+      --port=5555
+      --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+    ports:
+      - "5555:5555"
+    env_file: .env
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
+  model_cache:
