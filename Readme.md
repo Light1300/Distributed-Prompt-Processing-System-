@@ -220,6 +220,259 @@ alembic/
 
 ---
 
+## Sample Commands
+
+### Submitting and polling jobs
+
+```bash
+# Submit a high priority job
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "u1",
+    "prompt_id": "p1",
+    "text": "Explain quantum computing simply",
+    "priority": "high"
+  }' | python3 -m json.tool
+
+# Submit a normal priority job
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "u1",
+    "prompt_id": "p2",
+    "text": "What is machine learning?",
+    "priority": "normal"
+  }' | python3 -m json.tool
+
+# Submit a low priority job
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "u1",
+    "prompt_id": "p3",
+    "text": "How does the internet work?",
+    "priority": "low"
+  }' | python3 -m json.tool
+
+# Poll for result — replace <job_id> with value from submit response
+curl http://localhost:8000/v1/status/<job_id> | python3 -m json.tool
+
+# Submit same text with different prompt_id — should return cached: true
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "u1",
+    "prompt_id": "p4",
+    "text": "Explain quantum computing simply",
+    "priority": "normal"
+  }' | python3 -m json.tool
+```
+
+### Testing idempotency
+
+```bash
+# Submit the same prompt_id twice — both return the same job_id
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1","prompt_id":"idem-1","text":"What is photosynthesis?"}' \
+  | python3 -m json.tool
+
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1","prompt_id":"idem-1","text":"What is photosynthesis?"}' \
+  | python3 -m json.tool
+
+# Both responses will have the identical job_id
+```
+
+### Validation errors
+
+```bash
+# Missing required field — returns 422
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1","text":"hello"}' \
+  | python3 -m json.tool
+
+# Invalid priority value — returns 422
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1","prompt_id":"p1","text":"hello","priority":"urgent"}' \
+  | python3 -m json.tool
+
+# Invalid characters in user_id — returns 422
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1 with spaces","prompt_id":"p1","text":"hello"}' \
+  | python3 -m json.tool
+```
+
+### Health and metrics
+
+```bash
+# Health check
+curl http://localhost:8000/v1/health | python3 -m json.tool
+
+# Metrics for last 60 seconds
+curl http://localhost:8000/v1/metrics | python3 -m json.tool
+
+# Metrics for last 5 minutes
+curl http://localhost:8000/v1/metrics?window=300 | python3 -m json.tool
+
+# Metrics for last hour
+curl http://localhost:8000/v1/metrics?window=3600 | python3 -m json.tool
+```
+
+### Crash recovery demo
+
+```bash
+# Step 1 — submit a job
+curl -X POST http://localhost:8000/v1/process \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u1","prompt_id":"crash-demo","text":"What is the CAP theorem?"}' \
+  | python3 -m json.tool
+
+# Step 2 — kill worker1 immediately
+docker compose kill worker
+
+# Step 3 — poll for result — worker2 completes it
+curl http://localhost:8000/v1/status/<job_id> | python3 -m json.tool
+
+# Step 4 — restart worker1
+docker compose up -d worker
+```
+
+---
+
+## PostgreSQL — Inspecting the Database
+
+Connect to the database directly:
+
+```bash
+docker exec -it rumikai-queuing-postgres-1 psql -U promptuser -d promptdb
+```
+
+Or run one-off queries without entering the shell:
+
+```bash
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "<SQL here>"
+```
+
+### Check table structure
+
+```bash
+# List all tables
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "\dt"
+
+# See prompt_requests column definitions
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "\d prompt_requests"
+
+# See semantic_cache column definitions
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "\d semantic_cache"
+```
+
+### Inspect prompt_requests
+
+```bash
+# Most recent 10 requests
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_id, user_id, status, cached, retry_count, processing_time_ms, created_at
+FROM prompt_requests
+ORDER BY created_at DESC
+LIMIT 10;"
+
+# All completed requests
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_id, cached, processing_time_ms, created_at
+FROM prompt_requests
+WHERE status = 'completed'
+ORDER BY created_at DESC;"
+
+# All failed requests
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_id, error, retry_count, created_at
+FROM prompt_requests
+WHERE status = 'failed'
+ORDER BY created_at DESC;"
+
+# Any stuck jobs (processing for more than 5 minutes)
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_id, status, created_at, updated_at
+FROM prompt_requests
+WHERE status = 'processing'
+AND updated_at < NOW() - INTERVAL '5 minutes';"
+
+# Count by status
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT status, COUNT(*) as count
+FROM prompt_requests
+GROUP BY status
+ORDER BY count DESC;"
+
+# Summary stats — total, cache hits, avg latency, error rate
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT
+  COUNT(*)                                              AS total_requests,
+  SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+  SUM(CASE WHEN status = 'failed'    THEN 1 ELSE 0 END) AS failed,
+  SUM(CASE WHEN cached = true        THEN 1 ELSE 0 END) AS cache_hits,
+  ROUND(
+    SUM(CASE WHEN cached = true THEN 1 ELSE 0 END)::numeric
+    / NULLIF(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) * 100, 2
+  )                                                     AS cache_hit_pct,
+  ROUND(AVG(processing_time_ms))                        AS avg_latency_ms,
+  MIN(processing_time_ms)                               AS min_latency_ms,
+  MAX(processing_time_ms)                               AS max_latency_ms
+FROM prompt_requests;"
+
+# Requests in the last 10 minutes
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_id, status, cached, processing_time_ms
+FROM prompt_requests
+WHERE created_at > NOW() - INTERVAL '10 minutes'
+ORDER BY created_at DESC;"
+```
+
+### Inspect semantic_cache
+
+```bash
+# All cache entries with hit counts
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_text, hit_count, created_at, last_hit_at
+FROM semantic_cache
+ORDER BY hit_count DESC;"
+
+# Most popular cache entries
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_text, hit_count, created_at
+FROM semantic_cache
+WHERE hit_count > 0
+ORDER BY hit_count DESC
+LIMIT 10;"
+
+# Total cache entries
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT COUNT(*) AS total_cache_entries,
+       SUM(hit_count) AS total_cache_hits,
+       MAX(hit_count) AS max_hits_on_single_entry
+FROM semantic_cache;"
+
+# Cache entries never hit (hit_count = 0)
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_text, created_at
+FROM semantic_cache
+WHERE hit_count = 0
+ORDER BY created_at DESC;"
+
+# Cache entries added in last hour
+docker exec rumikai-queuing-postgres-1 psql -U promptuser -d promptdb -c "
+SELECT prompt_text, hit_count, created_at
+FROM semantic_cache
+WHERE created_at > NOW() - INTERVAL '1 hour'
+ORDER BY created_at DESC;"
+```
+
 ## Known Limitations
 
 - **Similarity lookup is O(n)** — the cache scans all embeddings in Python. At >50k entries, replace with a direct pgvector `ORDER BY embedding <=> $1 LIMIT 1` query to use the IVFFlat index.
